@@ -31,7 +31,7 @@ preflight scan --ci --format json
 
 For full documentation, supported checks, and configuration options, see the main repository:
 
-https://github.com/preflightsh/preflight.sh
+https://github.com/preflightsh/preflight
 
 ## License
 

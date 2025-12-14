@@ -6,7 +6,7 @@ const path = require('path');
 const { execSync } = require('child_process');
 const os = require('os');
 
-const REPO = 'preflightsh/preflight.sh';
+const REPO = 'preflightsh/preflight';
 const VERSION = require('./package.json').version;
 
 function getPlatform() {
