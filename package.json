@@ -1,0 +1,34 @@
+{
+  "name": "preflightsh",
+  "version": "0.6.1",
+  "description": "CLI tool that scans your codebase for launch readiness",
+  "bin": {
+    "preflight": "run.js"
+  },
+  "scripts": {
+    "postinstall": "node install.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/preflightsh/npm-preflight.git"
+  },
+  "keywords": [
+    "preflight",
+    "cli",
+    "deployment",
+    "launch",
+    "checklist",
+    "seo",
+    "security",
+    "devops"
+  ],
+  "author": "Jon Phillips",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/preflightsh/preflight.sh/issues"
+  },
+  "homepage": "https://preflight.sh",
+  "engines": {
+    "node": ">=14"
+  }
+}
