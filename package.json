@@ -1,5 +1,5 @@
 {
-  "name": "preflightsh",
+  "name": "@preflightsh/preflight",
   "version": "0.6.1",
   "description": "CLI tool that scans your codebase for launch readiness",
   "bin": {
@@ -30,5 +30,8 @@
   "homepage": "https://preflight.sh",
   "engines": {
     "node": ">=14"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }
