@@ -20,11 +20,6 @@ jobs:
         with:
           node-version: '22'
 
-      - name: Update npm and check version
-        run: |
-          npm install -g npm@latest
-          npm --version
-
       - name: Update version and publish
         run: |
           VERSION=${{ github.event.client_payload.version }}
