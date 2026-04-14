@@ -26,5 +26,3 @@ jobs:
           VERSION=${{ github.event.client_payload.version }}
           npm version $VERSION --no-git-tag-version
           npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
