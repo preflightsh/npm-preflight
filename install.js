@@ -79,7 +79,10 @@ async function install() {
     if (ext === 'tar.gz') {
       execSync(`tar -xzf "${archivePath}" -C "${binDir}"`, { stdio: 'ignore' });
     } else {
-      execSync(`unzip -o "${archivePath}" -d "${binDir}"`, { stdio: 'ignore' });
+      // Windows doesn't ship with `unzip`. PowerShell's Expand-Archive is
+      // built into Windows 10+ and Windows Server 2016+.
+      const psCmd = `Expand-Archive -Force -Path '${archivePath.replace(/'/g, "''")}' -DestinationPath '${binDir.replace(/'/g, "''")}'`;
+      execSync(`powershell -NoProfile -NonInteractive -Command "${psCmd}"`, { stdio: 'ignore' });
     }
 
     const binaryPath = path.join(binDir, binaryName);
