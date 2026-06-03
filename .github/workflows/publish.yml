@@ -24,6 +24,10 @@ jobs:
       - name: Update version and publish
         run: |
           VERSION=${{ github.event.client_payload.version }}
+          if npm view "@preflightsh/preflight@$VERSION" version > /dev/null 2>&1; then
+            echo "@preflightsh/preflight@$VERSION is already published; nothing to do."
+            exit 0
+          fi
           npm version $VERSION --no-git-tag-version
           npm publish --provenance --access public
         env:
