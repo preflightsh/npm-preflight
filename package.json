@@ -25,7 +25,7 @@
   "author": "Jon Phillips",
   "license": "MIT",
   "bugs": {
-    "url": "https://github.com/preflightsh/preflight.sh/issues"
+    "url": "https://github.com/preflightsh/preflight/issues"
   },
   "homepage": "https://preflight.sh",
   "engines": {

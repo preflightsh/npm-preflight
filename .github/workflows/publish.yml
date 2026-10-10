@@ -11,26 +11,47 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '22'
           registry-url: 'https://registry.npmjs.org'
 
       # Trusted publishing (OIDC) needs npm 11.5.1 or newer; Node 22 ships 10.x.
+      # Pinned, because this job can publish.
       - name: Update npm
-        run: npm install -g npm@latest
+        run: npm install -g npm@11.21.0
+
+      # The version comes from the dispatch payload, so it is data: it goes in
+      # through env, must be plain semver, and must name a real CLI release
+      # (install.js downloads that release's binary and checks its checksum).
+      - name: Check the version
+        env:
+          VERSION: ${{ github.event.client_payload.version }}
+        run: |
+          if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'; then
+            echo "::error::client_payload.version is not a semver version"
+            exit 1
+          fi
+          code=$(curl -s -o /dev/null -w '%{http_code}' "https://api.github.com/repos/preflightsh/preflight/releases/tags/v$VERSION")
+          if [ "$code" != "200" ]; then
+            echo "::error::preflightsh/preflight has no published release v$VERSION (HTTP $code)"
+            exit 1
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
 
       - name: Update version and publish
         run: |
-          VERSION=${{ github.event.client_payload.version }}
           if npm view "@preflightsh/preflight@$VERSION" version > /dev/null 2>&1; then
             echo "@preflightsh/preflight@$VERSION is already published; nothing to do."
             exit 0
           fi
-          npm version $VERSION --no-git-tag-version
+          npm version "$VERSION" --no-git-tag-version
           npm publish --provenance --access public

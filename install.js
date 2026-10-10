@@ -1,13 +1,21 @@
 #!/usr/bin/env node
 
+// Downloads the preflight binary for this platform from the GitHub release
+// that matches this package's version, checks it against the release's
+// checksums.txt, and puts only the binary next to this file. Any failure,
+// a checksum mismatch above all, leaves no binary behind and exits non-zero.
+
 const https = require('https');
 const fs = require('fs');
 const path = require('path');
-const { execSync } = require('child_process');
+const crypto = require('crypto');
+const { execFileSync } = require('child_process');
 const os = require('os');
 
 const REPO = 'preflightsh/preflight';
 const VERSION = require('./package.json').version;
+const MAX_REDIRECTS = 5;
+const TIMEOUT_MS = 60000;
 
 function getPlatform() {
   const platform = os.platform();
@@ -28,33 +36,82 @@ function getArch() {
   }
 }
 
-function download(url, dest) {
+// download fetches url into dest, following up to MAX_REDIRECTS https
+// redirects. GitHub release assets redirect once to their storage host.
+function download(url, dest, hops = 0) {
   return new Promise((resolve, reject) => {
-    const file = fs.createWriteStream(dest);
-    https.get(url, (response) => {
-      if (response.statusCode === 302 || response.statusCode === 301) {
-        file.close();
-        fs.unlinkSync(dest);
-        download(response.headers.location, dest).then(resolve).catch(reject);
+    let target;
+    try {
+      target = new URL(url);
+    } catch (err) {
+      reject(new Error(`Bad download URL: ${url}`));
+      return;
+    }
+    if (target.protocol !== 'https:') {
+      reject(new Error(`Refusing a non-https download: ${url}`));
+      return;
+    }
+    const req = https.get(target, (response) => {
+      const status = response.statusCode;
+      if (status >= 300 && status < 400 && response.headers.location) {
+        response.resume();
+        if (hops >= MAX_REDIRECTS) {
+          reject(new Error(`Too many redirects downloading ${url}`));
+          return;
+        }
+        const next = new URL(response.headers.location, target).toString();
+        download(next, dest, hops + 1).then(resolve, reject);
         return;
       }
-      if (response.statusCode !== 200) {
-        file.close();
-        fs.unlinkSync(dest);
-        reject(new Error(`Failed to download: ${response.statusCode}`));
+      if (status !== 200) {
+        response.resume();
+        reject(new Error(`Failed to download ${url}: HTTP ${status}`));
         return;
       }
+      const file = fs.createWriteStream(dest);
+      const fail = (err) => {
+        response.destroy();
+        file.destroy();
+        reject(err);
+      };
+      response.on('error', fail);
+      file.on('error', fail);
+      file.on('finish', () => file.close((err) => (err ? reject(err) : resolve())));
       response.pipe(file);
-      file.on('finish', () => {
-        file.close();
-        resolve();
-      });
-    }).on('error', (err) => {
-      file.close();
-      fs.unlinkSync(dest);
-      reject(err);
     });
+    req.setTimeout(TIMEOUT_MS, () => req.destroy(new Error(`Timed out downloading ${url}`)));
+    req.on('error', reject);
   });
+}
+
+function sha256(file) {
+  return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+}
+
+// expectedSum reads filename's SHA-256 from a goreleaser checksums.txt.
+function expectedSum(checksumsPath, filename) {
+  for (const line of fs.readFileSync(checksumsPath, 'utf8').split('\n')) {
+    const m = line.trim().match(/^([0-9a-f]{64})\s+\*?(\S+)$/);
+    if (m && m[2] === filename) {
+      return m[1];
+    }
+  }
+  throw new Error(`checksums.txt has no entry for ${filename}`);
+}
+
+function extract(archivePath, ext, outDir) {
+  if (ext === 'tar.gz') {
+    execFileSync('tar', ['-xzf', archivePath, '-C', outDir], { stdio: 'ignore' });
+    return;
+  }
+  // Windows doesn't ship with `unzip`. PowerShell's Expand-Archive is built
+  // into Windows 10+ and Windows Server 2016+. The paths go in as arguments,
+  // never into the script text.
+  execFileSync('powershell', [
+    '-NoProfile', '-NonInteractive', '-Command',
+    'Expand-Archive -Force -LiteralPath $args[0] -DestinationPath $args[1]',
+    archivePath, outDir,
+  ], { stdio: 'ignore' });
 }
 
 async function install() {
@@ -63,38 +120,46 @@ async function install() {
 
   const ext = platform === 'windows' ? 'zip' : 'tar.gz';
   const filename = `preflight_${VERSION}_${platform}_${arch}.${ext}`;
-  const url = `https://github.com/${REPO}/releases/download/v${VERSION}/${filename}`;
+  const base = `https://github.com/${REPO}/releases/download/v${VERSION}`;
+  const binaryName = platform === 'windows' ? 'preflight.exe' : 'preflight';
+  const binaryPath = path.join(__dirname, binaryName);
 
   console.log(`Downloading preflight v${VERSION} for ${platform}/${arch}...`);
 
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'preflight-'));
   const archivePath = path.join(tmpDir, filename);
+  const checksumsPath = path.join(tmpDir, 'checksums.txt');
+  const outDir = path.join(tmpDir, 'out');
 
   try {
-    await download(url, archivePath);
+    await download(`${base}/checksums.txt`, checksumsPath);
+    await download(`${base}/${filename}`, archivePath);
 
-    const binDir = __dirname;
-    const binaryName = platform === 'windows' ? 'preflight.exe' : 'preflight';
-
-    if (ext === 'tar.gz') {
-      execSync(`tar -xzf "${archivePath}" -C "${binDir}"`, { stdio: 'ignore' });
-    } else {
-      // Windows doesn't ship with `unzip`. PowerShell's Expand-Archive is
-      // built into Windows 10+ and Windows Server 2016+.
-      const psCmd = `Expand-Archive -Force -Path '${archivePath.replace(/'/g, "''")}' -DestinationPath '${binDir.replace(/'/g, "''")}'`;
-      execSync(`powershell -NoProfile -NonInteractive -Command "${psCmd}"`, { stdio: 'ignore' });
+    const want = expectedSum(checksumsPath, filename);
+    const got = sha256(archivePath);
+    if (got !== want) {
+      throw new Error(`Checksum mismatch for ${filename}: expected ${want}, got ${got}`);
     }
 
-    const binaryPath = path.join(binDir, binaryName);
+    fs.mkdirSync(outDir);
+    extract(archivePath, ext, outDir);
+    const extracted = path.join(outDir, binaryName);
+    if (!fs.lstatSync(extracted).isFile()) {
+      throw new Error(`${filename} has no ${binaryName} file`);
+    }
 
+    // Copy, then rename into place, so a failure never leaves half a binary.
+    const staged = `${binaryPath}.download`;
+    fs.copyFileSync(extracted, staged);
     if (platform !== 'windows') {
-      fs.chmodSync(binaryPath, 0o755);
+      fs.chmodSync(staged, 0o755);
     }
+    fs.renameSync(staged, binaryPath);
 
     console.log('Preflight installed successfully!');
   } catch (error) {
     console.error('Failed to install preflight:', error.message);
-    process.exit(1);
+    process.exitCode = 1;
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
