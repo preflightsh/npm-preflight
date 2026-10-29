@@ -60,4 +60,21 @@ jobs:
             *-*) TAG=next ;;
             *) TAG=latest ;;
           esac
-          npm publish --provenance --access public --tag "$TAG"
+          # Sigstore's transparency log sometimes accepts the provenance entry,
+          # times out the reply, and answers npm's own retry with a 409, which
+          # npm treats as fatal (TLOG_CREATE_ENTRY_ERROR, v0.25.0). Try up to
+          # three times, and before each retry check whether the version
+          # landed anyway, so it is never published twice.
+          for attempt in 1 2 3; do
+            if npm publish --provenance --access public --tag "$TAG"; then
+              exit 0
+            fi
+            echo "::warning::npm publish attempt $attempt failed"
+            sleep 30
+            if npm view "@preflightsh/preflight@$VERSION" version > /dev/null 2>&1; then
+              echo "@preflightsh/preflight@$VERSION is on the registry; done."
+              exit 0
+            fi
+          done
+          echo "::error::npm publish failed three times"
+          exit 1
