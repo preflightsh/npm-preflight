@@ -54,4 +54,10 @@ jobs:
             exit 0
           fi
           npm version "$VERSION" --no-git-tag-version
-          npm publish --provenance --access public
+          # A prerelease (1.0.0-rc.1) goes to the next dist-tag so it never
+          # becomes what `npm install -g @preflightsh/preflight` resolves to.
+          case "$VERSION" in
+            *-*) TAG=next ;;
+            *) TAG=latest ;;
+          esac
+          npm publish --provenance --access public --tag "$TAG"
