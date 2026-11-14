@@ -25,6 +25,36 @@ function couldNotStart(err) {
   process.exit(127);
 }
 
+// The first bytes of a program file: ELF, Mach-O (thin or universal), or a
+// Windows executable. On Linux a file that is none of these but has the
+// execute bit is handed to /bin/sh, which prints a confusing "not found"
+// for whatever bytes it holds, so check before starting it.
+function looksLikeProgram(file) {
+  let head;
+  try {
+    const fd = fs.openSync(file, 'r');
+    head = Buffer.alloc(4);
+    const read = fs.readSync(fd, head, 0, 4, 0);
+    fs.closeSync(fd);
+    if (read < 4) {
+      return false;
+    }
+  } catch (err) {
+    // Unreadable: let spawn report the real reason.
+    return true;
+  }
+  const magic = head.toString('hex');
+  return magic === '7f454c46' // ELF
+    || magic === 'cffaedfe' || magic === 'cefaedfe' // Mach-O
+    || magic === 'cafebabe' || magic === 'bebafeca' // universal Mach-O
+    || magic.startsWith('4d5a') // MZ
+    || magic.startsWith('2321'); // a #! script, which the tests stand in with
+}
+
+if (!looksLikeProgram(binaryPath)) {
+  couldNotStart(new Error('the file is not a program'));
+}
+
 let child;
 try {
   child = spawn(binaryPath, process.argv.slice(2), {

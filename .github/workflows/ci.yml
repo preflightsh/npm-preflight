@@ -55,7 +55,9 @@ jobs:
           echo "VERSION=$version" >> "$GITHUB_ENV"
 
       - name: Unit tests
-        run: node --test test/
+        # The file is named: a bare directory is read as a script path by
+        # some Node versions, and stub.js beside it is a helper, not a test.
+        run: node --test test/install.test.js
 
       - name: Install, checking against the release's checksums.txt
         run: |
