@@ -2,3 +2,7 @@ node_modules/
 preflight
 preflight.exe
 .DS_Store
+checksums.json
+preflight.download
+preflight.exe.download
+*.tgz
