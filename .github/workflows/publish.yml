@@ -8,6 +8,12 @@ permissions:
   contents: read
   id-token: write
 
+# One publish at a time: two dispatches for the same release must not race
+# each other to the registry.
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
 jobs:
   publish:
     runs-on: ubuntu-latest
@@ -30,36 +36,93 @@ jobs:
         run: npm install -g npm@11.21.0
 
       # The version comes from the dispatch payload, so it is data: it goes in
-      # through env, must be plain semver, and must name a real CLI release
-      # (install.js downloads that release's binary and checks its checksum).
+      # through env, must be plain semver from its first character to its
+      # last (a bash match, not grep, which tests each line on its own), and
+      # must name a real CLI release.
       - name: Check the version
         env:
           VERSION: ${{ github.event.client_payload.version }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'; then
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
             echo "::error::client_payload.version is not a semver version"
             exit 1
           fi
-          code=$(curl -s -o /dev/null -w '%{http_code}' "https://api.github.com/repos/preflightsh/preflight/releases/tags/v$VERSION")
+          # Authenticated: without a token the API allows 60 requests an hour
+          # per runner address, and a throttled runner reads as "no release".
+          code=$(curl -s -o /dev/null -w '%{http_code}' \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/preflightsh/preflight/releases/tags/v$VERSION")
           if [ "$code" != "200" ]; then
             echo "::error::preflightsh/preflight has no published release v$VERSION (HTTP $code)"
             exit 1
           fi
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
 
-      - name: Update version and publish
+      # The check compares what the registry printed with the version. The
+      # exit status alone is not enough: a registry error would read as "not
+      # published", and an empty answer as "already published".
+      - name: Skip a version that is already published
+        id: registry
         run: |
-          if npm view "@preflightsh/preflight@$VERSION" version > /dev/null 2>&1; then
+          have=$(npm view "@preflightsh/preflight@$VERSION" version 2>/dev/null || true)
+          if [ "$have" = "$VERSION" ]; then
             echo "@preflightsh/preflight@$VERSION is already published; nothing to do."
-            exit 0
+            echo "published=true" >> "$GITHUB_OUTPUT"
           fi
+
+      # The package carries the SHA-256 of every archive install.js can
+      # download, taken from the release now and published with provenance,
+      # so an install checks the binary against the tarball, not against a
+      # file that sits next to the binary.
+      - name: Set the version and pin the release checksums
+        if: steps.registry.outputs.published != 'true'
+        run: |
           npm version "$VERSION" --no-git-tag-version
-          # A prerelease (1.0.0-rc.1) goes to the next dist-tag so it never
-          # becomes what `npm install -g @preflightsh/preflight` resolves to.
-          case "$VERSION" in
-            *-*) TAG=next ;;
-            *) TAG=latest ;;
+          base="https://github.com/preflightsh/preflight/releases/download/v$VERSION"
+          curl -fsSL --retry 3 "$base/checksums.txt" -o "$RUNNER_TEMP/checksums.txt"
+          node scripts/pin-checksums.js "$RUNNER_TEMP/checksums.txt"
+          for archive in $(node -p 'Object.keys(require("./checksums.json").files).join(" ")'); do
+            if ! curl -fsSIL --retry 3 -o /dev/null "$base/$archive"; then
+              echo "::error::release v$VERSION has no $archive"
+              exit 1
+            fi
+          done
+
+      # Install and run exactly what is about to be published.
+      - name: Install and run the package
+        if: steps.registry.outputs.published != 'true'
+        run: |
+          node install.js
+          got=$(node run.js version)
+          echo "$got"
+          case "$got" in
+            *"$VERSION"*) ;;
+            *) echo "::error::the installed binary does not report $VERSION"; exit 1 ;;
           esac
+          rm -f preflight
+          npm pack --dry-run --json > "$RUNNER_TEMP/pack.json"
+          node -e '
+            const files = require(process.argv[1])[0].files.map((f) => f.path).sort();
+            const want = ["README.md", "checksums.json", "install.js", "package.json", "run.js"];
+            if (JSON.stringify(files) !== JSON.stringify(want)) {
+              console.error("::error::unexpected package contents: " + files.join(", "));
+              process.exit(1);
+            }
+          ' "$RUNNER_TEMP/pack.json"
+
+      - name: Publish
+        if: steps.registry.outputs.published != 'true'
+        run: |
+          # The package exists, so a failed lookup is a registry problem, and
+          # guessing "latest" then could move latest backwards.
+          if ! latest=$(npm view @preflightsh/preflight dist-tags.latest); then
+            echo "::error::could not read the current latest version from the registry"
+            exit 1
+          fi
+          TAG=$(node scripts/dist-tag.js "$VERSION" "$latest")
+          echo "Publishing $VERSION under the $TAG dist-tag (latest is $latest)"
           # Sigstore's transparency log sometimes accepts the provenance entry,
           # times out the reply, and answers npm's own retry with a 409, which
           # npm treats as fatal (TLOG_CREATE_ENTRY_ERROR, v0.25.0). Try up to
@@ -71,7 +134,8 @@ jobs:
             fi
             echo "::warning::npm publish attempt $attempt failed"
             sleep 30
-            if npm view "@preflightsh/preflight@$VERSION" version > /dev/null 2>&1; then
+            have=$(npm view "@preflightsh/preflight@$VERSION" version 2>/dev/null || true)
+            if [ "$have" = "$VERSION" ]; then
               echo "@preflightsh/preflight@$VERSION is on the registry; done."
               exit 0
             fi
