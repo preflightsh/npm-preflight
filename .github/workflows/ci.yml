@@ -1,0 +1,139 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Installs the real CLI release with this package's installer on every
+  # platform the package claims to support, the way a user's `npm install`
+  # does. Nothing else runs install.js on Windows before a release.
+  install:
+    name: install (${{ matrix.os }}, node ${{ matrix.node }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        node: ['18', '22']
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ matrix.node }}
+
+      # package.json carries a placeholder version in git; the publish
+      # workflow sets the real one. Use the latest CLI release, read from the
+      # releases/latest redirect (the API allows 60 requests an hour per
+      # runner address without a token).
+      - name: Use the latest CLI release as the package version
+        run: |
+          url=$(curl -fsSLI -o /dev/null -w '%{url_effective}' https://github.com/preflightsh/preflight/releases/latest)
+          version=${url##*/v}
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::could not read the latest release from $url"
+            exit 1
+          fi
+          npm version "$version" --no-git-tag-version --allow-same-version
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Unit tests
+        run: node --test test/
+
+      - name: Install, checking against the release's checksums.txt
+        run: |
+          node install.js
+          node run.js version | tee version.txt
+          grep -F "$VERSION" version.txt
+
+      - name: Exit codes pass through the wrapper
+        run: |
+          set +e
+          node run.js scan ./no-such-directory
+          code=$?
+          set -e
+          echo "exit code: $code"
+          test "$code" -eq 64
+
+      - name: Install, checking against checksums pinned in the package
+        run: |
+          rm -f preflight preflight.exe
+          curl -fsSL --retry 3 "https://github.com/preflightsh/preflight/releases/download/v$VERSION/checksums.txt" -o checksums.txt
+          node scripts/pin-checksums.js checksums.txt
+          node install.js
+          node run.js version | grep -F "$VERSION"
+
+      - name: A wrong pinned checksum is refused
+        run: |
+          rm -f preflight preflight.exe
+          cp checksums.json checksums.good.json
+          node -e '
+            const fs = require("fs");
+            const pinned = JSON.parse(fs.readFileSync("checksums.json", "utf8"));
+            for (const name of Object.keys(pinned.files)) pinned.files[name] = "0".repeat(64);
+            fs.writeFileSync("checksums.json", JSON.stringify(pinned));
+          '
+          if node install.js; then
+            echo "::error::install.js accepted an archive that does not match the pinned checksum"
+            exit 1
+          fi
+          test ! -e preflight
+          test ! -e preflight.exe
+          mv checksums.good.json checksums.json
+
+      - name: Windows, extract with tar only
+        if: runner.os == 'Windows'
+        env:
+          PREFLIGHT_NPM_EXTRACTOR: tar
+        run: |
+          rm -f preflight.exe
+          node install.js
+          node run.js version | grep -F "$VERSION"
+
+      - name: Windows, extract with PowerShell only
+        if: runner.os == 'Windows'
+        env:
+          PREFLIGHT_NPM_EXTRACTOR: powershell
+        run: |
+          rm -f preflight.exe
+          node install.js
+          node run.js version | grep -F "$VERSION"
+
+      # The packed tarball, installed globally into a scratch prefix: this
+      # runs the postinstall script and the bin shim npm writes, which on
+      # Windows is a .cmd file.
+      - name: Install the packed tarball the way a user does
+        run: |
+          rm -f preflight preflight.exe
+          npm pack
+          prefix="$RUNNER_TEMP/prefix"
+          npm install -g --prefix "$prefix" "./preflightsh-preflight-$VERSION.tgz"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            bin="$prefix/preflight"
+            cmd //c "$(cygpath -w "$prefix/preflight.cmd")" version | grep -F "$VERSION"
+          else
+            bin="$prefix/bin/preflight"
+          fi
+          "$bin" version | grep -F "$VERSION"
+          set +e
+          "$bin" scan ./no-such-directory
+          code=$?
+          set -e
+          test "$code" -eq 64
