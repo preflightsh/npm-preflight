@@ -5,6 +5,11 @@
   "bin": {
     "preflight": "run.js"
   },
+  "files": [
+    "install.js",
+    "run.js",
+    "checksums.json"
+  ],
   "scripts": {
     "postinstall": "node install.js"
   },
@@ -29,8 +34,17 @@
   },
   "homepage": "https://preflight.sh",
   "engines": {
-    "node": ">=14"
+    "node": ">=18"
   },
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
   "publishConfig": {
     "access": "public"
   }
